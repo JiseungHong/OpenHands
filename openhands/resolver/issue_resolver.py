@@ -14,7 +14,6 @@ from uuid import uuid4
 from termcolor import colored
 
 import openhands
-from openhands.controller.state.state import State
 from openhands.core.config import AgentConfig, OpenHandsConfig, SandboxConfig
 from openhands.core.config.utils import load_openhands_config
 from openhands.core.logger import openhands_logger as logger
@@ -186,8 +185,13 @@ class IssueResolver:
         runtime: str | None = None,
     ) -> OpenHandsConfig:
         config.default_agent = 'CodeActAgent'
-        # Use provided runtime or fallback to config value or default to 'docker'
+        # Validate and set runtime
+        valid_runtimes = {'docker', 'local', 'e2b', 'modal'}
         config.runtime = runtime or config.runtime or 'docker'
+        if config.runtime not in valid_runtimes:
+            raise ValueError(
+                f"Invalid runtime '{config.runtime}'. Valid options are: {', '.join(valid_runtimes)}"
+            )
         config.max_budget_per_task = 4
         config.max_iterations = max_iterations
 
@@ -361,6 +365,17 @@ class IssueResolver:
         n_retries = 0
         git_patch = None
         while n_retries < 5:
+            # Verify base_commit exists
+            check_commit_action = CmdRunAction(
+                command=f'git rev-parse --verify {base_commit}'
+            )
+            logger.info(check_commit_action, extra={'msg_type': 'ACTION'})
+            check_obs = runtime.run_action(check_commit_action)
+            if (
+                not isinstance(check_obs, CmdOutputObservation)
+                or check_obs.exit_code != 0
+            ):
+                base_commit = 'HEAD'  # Fallback to HEAD if base_commit is invalid
             action = CmdRunAction(command=f'git diff --no-color --cached {base_commit}')
             action.set_hard_timeout(600 + 100 * n_retries)
             logger.info(action, extra={'msg_type': 'ACTION'})
@@ -387,10 +402,13 @@ class IssueResolver:
 
     @staticmethod
     def build_workspace_base(
-        output_dir: str, issue_type: str, issue_number: int
+        output_dir: str, issue_type: str, issue_number: int | None
     ) -> str:
+        issue_number_str = (
+            str(issue_number) if issue_number is not None else 'new_issue'
+        )
         workspace_base = os.path.join(
-            output_dir, 'workspace', f'{issue_type}_{issue_number}'
+            output_dir, 'workspace', f'{issue_type}_{issue_number_str}'
         )
         return os.path.abspath(workspace_base)
 
@@ -436,7 +454,7 @@ class IssueResolver:
         # Here's how you can run the agent (similar to the `main` function) and get the final task state
         action = MessageAction(content=instruction, image_urls=images_urls)
         try:
-            state: State | None = await run_controller(
+            state = await run_controller(
                 config=self.app_config,
                 initial_user_action=action,
                 runtime=runtime,
